@@ -256,7 +256,13 @@
                 <span class="text-xs bg-gray-800 text-gray-400 border border-border px-2.5 py-1 rounded-full">Complete</span>
               </template>
               <template x-if="s.status==='incomplete'">
-                <span class="text-xs bg-amber-900/30 text-amber-400 border border-amber-800/50 px-2.5 py-1 rounded-full">Incomplete</span>
+                <div class="flex items-center gap-2">
+                  <span class="text-xs bg-amber-900/30 text-amber-400 border border-amber-800/50 px-2.5 py-1 rounded-full">Incomplete</span>
+                  <button @click.stop="resumeSession(s.session_id)"
+                    class="text-xs bg-violet-900/40 text-violet-400 border border-violet-700/50 hover:bg-violet-800/50 px-2.5 py-1 rounded-full transition-colors">
+                    ▶ Resume
+                  </button>
+                </div>
               </template>
               <span class="text-gray-600 group-hover:text-gray-400 transition-colors text-lg">›</span>
             </div>
@@ -391,7 +397,7 @@
       </fieldset>
 
       <!-- Budget + Mode -->
-      <div class="grid grid-cols-3 gap-3">
+      <div class="grid grid-cols-4 gap-3">
         <div>
           <label class="block text-xs text-gray-400 mb-1">Max missions</label>
           <input x-model.number="form.max_missions" type="number" min="1" max="50"
@@ -400,6 +406,12 @@
         <div>
           <label class="block text-xs text-gray-400 mb-1">Turn budget</label>
           <input x-model.number="form.turn_budget" type="number" min="1" max="30"
+            class="w-full bg-surface border border-border rounded px-2.5 py-1.5 text-sm text-white focus:outline-none focus:border-violet-500">
+        </div>
+        <div>
+          <label class="block text-xs text-gray-400 mb-1">Branches</label>
+          <input x-model.number="form.parallel_branches" type="number" min="1" max="8"
+            title="Parallel Garak branches per OODA cycle. Best result is fed to Sherlock."
             class="w-full bg-surface border border-border rounded px-2.5 py-1.5 text-sm text-white focus:outline-none focus:border-violet-500">
         </div>
         <div>
@@ -490,6 +502,49 @@
         <!-- Error banner -->
         <div x-show="sessionStatus==='error'"
           class="bg-red-950/40 border border-red-800/40 rounded-lg px-4 py-3 text-red-400 text-sm" x-text="errorMsg||'Session failed.'">
+        </div>
+
+        <!-- HITL pause banner -->
+        <div x-show="hitlPending" x-cloak
+          class="bg-blue-950/50 border border-blue-700/60 rounded-lg px-4 py-4 space-y-3">
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-blue-400 pulse flex-shrink-0"></span>
+            <p class="text-blue-300 font-semibold text-sm">⏸ Awaiting your review</p>
+          </div>
+          <template x-if="hitlPayload">
+            <div class="space-y-2">
+              <p class="text-xs text-gray-400"><span class="font-medium text-gray-300">Objective:</span> <span x-text="hitlPayload.auftrag?.objective || '—'"></span></p>
+              <p class="text-xs text-gray-400"><span class="font-medium text-gray-300">Sherlock's decision:</span> <span x-text="hitlPayload.decide || '—'"></span></p>
+            </div>
+          </template>
+          <!-- Revise textarea (shown only when revising) -->
+          <div x-show="hitlRevising" class="space-y-2">
+            <label class="text-xs text-gray-400">Override objective (optional):</label>
+            <input x-model="hitlRevision.objective" type="text" placeholder="Leave blank to keep Sherlock's objective"
+              class="w-full bg-surface border border-border rounded px-2.5 py-1.5 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-blue-500">
+            <label class="text-xs text-gray-400">Override success criteria (optional):</label>
+            <input x-model="hitlRevision.success_criteria" type="text" placeholder="Leave blank to keep Sherlock's criteria"
+              class="w-full bg-surface border border-border rounded px-2.5 py-1.5 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-blue-500">
+          </div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <button @click="submitHitl('approve')" :disabled="hitlSubmitting"
+              class="text-xs bg-green-900/50 text-green-400 border border-green-700/50 hover:bg-green-800/50 disabled:opacity-50 px-3 py-1.5 rounded transition-colors">
+              ✓ Approve
+            </button>
+            <button @click="hitlRevising=!hitlRevising" :disabled="hitlSubmitting"
+              class="text-xs bg-blue-900/40 text-blue-400 border border-blue-700/50 hover:bg-blue-800/40 disabled:opacity-50 px-3 py-1.5 rounded transition-colors"
+              x-text="hitlRevising ? '✕ Cancel revise' : '✎ Revise'">
+            </button>
+            <button x-show="hitlRevising" @click="submitHitl('revise')" :disabled="hitlSubmitting"
+              class="text-xs bg-amber-900/40 text-amber-400 border border-amber-700/50 hover:bg-amber-800/40 disabled:opacity-50 px-3 py-1.5 rounded transition-colors">
+              Send revision
+            </button>
+            <button @click="submitHitl('reject')" :disabled="hitlSubmitting"
+              class="text-xs bg-red-900/30 text-red-400 border border-red-700/50 hover:bg-red-800/30 disabled:opacity-50 px-3 py-1.5 rounded transition-colors">
+              ✗ Reject
+            </button>
+          </div>
+          <p x-show="hitlError" class="text-xs text-red-400" x-text="hitlError"></p>
         </div>
 
         <!-- OODA cycles -->
@@ -773,6 +828,7 @@
         scorer_model: 'gpt-4o-mini',
         max_missions: 10,
         turn_budget: 8,
+        parallel_branches: 1,
         mode: 'autonomous',
         showSystemPrompt: false,
         showContext: false,
@@ -848,6 +904,14 @@
       hasStream: false,
       replayLoading: false,
       errorMsg: '',
+
+      // ── HITL ─────────────────────────────────────────────────────────
+      hitlPending: false,
+      hitlPayload: null,
+      hitlRevising: false,
+      hitlRevision: { objective: '', success_criteria: '' },
+      hitlSubmitting: false,
+      hitlError: '',
       cycles: [],           // [{cycleId, status, observe, orient, decide, actionType, expanded, fullObserve, mission}]
       intelTab: 'target',
       targetMd: '',
@@ -949,6 +1013,54 @@
         }
       },
 
+      // ── Resume session ────────────────────────────────────────────────
+      async resumeSession(id) {
+        try {
+          const res = await fetch(`/api/sessions/${id}/resume`, { method: 'POST' });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            alert('Could not resume session: ' + (err.detail || res.statusText));
+            return;
+          }
+          this.goTo('session', { id });
+        } catch(e) {
+          alert('Network error: ' + e.message);
+        }
+      },
+
+      // ── HITL response ─────────────────────────────────────────────────
+      async submitHitl(action) {
+        if (!this.sessionId) return;
+        this.hitlSubmitting = true;
+        this.hitlError = '';
+        try {
+          const revision = {};
+          if (action === 'revise') {
+            if (this.hitlRevision.objective.trim())
+              revision.objective = this.hitlRevision.objective.trim();
+            if (this.hitlRevision.success_criteria.trim())
+              revision.success_criteria = this.hitlRevision.success_criteria.trim();
+          }
+          const res = await fetch(`/api/sessions/${this.sessionId}/hitl`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, revision }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            this.hitlError = err.detail || 'Failed to submit HITL response.';
+            return;
+          }
+          this.hitlPending = false;
+          this.hitlPayload = null;
+          this.hitlRevising = false;
+        } catch(e) {
+          this.hitlError = 'Network error: ' + e.message;
+        } finally {
+          this.hitlSubmitting = false;
+        }
+      },
+
       // ── Session detail ────────────────────────────────────────────────
       async openSession(id) {
         this.sessionId = id;
@@ -963,6 +1075,12 @@
         this.sessionReport = '';
         this.intelTab = 'target';
         this.replayLoading = false;
+        this.hitlPending = false;
+        this.hitlPayload = null;
+        this.hitlRevising = false;
+        this.hitlRevision = { objective: '', success_criteria: '' };
+        this.hitlSubmitting = false;
+        this.hitlError = '';
         this.eventSource?.close();
         this.eventSource = null;
 
@@ -1132,6 +1250,16 @@
           this.sessionSummary = event.session_summary || '';
           if (event.objective_achieved) this.intelTab = 'report';
           this.refreshIntel();
+        } else if (t === 'hitl_pause') {
+          this.hitlPending = true;
+          this.hitlPayload = event;
+          this.hitlRevising = false;
+          this.hitlRevision = { objective: '', success_criteria: '' };
+          this.hitlError = '';
+        } else if (t === 'hitl_resume') {
+          // Emitted when human response was received and session continues
+          this.hitlPending = false;
+          this.hitlPayload = null;
         } else if (t === 'not_in_memory') {
           this.hasStream = false;
         } else if (t === 'error') {

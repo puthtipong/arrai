@@ -55,6 +55,7 @@ class StartSessionRequest(BaseModel):
     max_missions: int = 10
     turn_budget: int = 8
     mode: str = "autonomous"
+    parallel_branches: int = 1
 
 
 class SetKeysRequest(BaseModel):
@@ -65,6 +66,11 @@ class SetKeysRequest(BaseModel):
     anthropic_api_key: str = ""
     extra_key_name: str = ""   # arbitrary env-var name
     extra_key_value: str = ""
+
+
+class HitlRequest(BaseModel):
+    action: str          # "approve" | "revise" | "reject"
+    revision: dict = {}  # optional edits to the Auftrag when action=="revise"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,6 +84,7 @@ class ManagedSession:
     event_log: list[dict] = field(default_factory=list)
     status: str = "running"   # running | complete | error
     task: Any = field(default=None, repr=False)
+    session_obj: Any = field(default=None, repr=False)  # live Session; set by on_session_ready
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -204,6 +211,7 @@ def create_app(
             mode=req.mode,
             max_missions=req.max_missions,
             default_turn_budget=req.turn_budget,
+            parallel_branches=req.parallel_branches,
             sherlock_model=req.sherlock_model,
             sherlock_effort=req.sherlock_effort,
             garak_model=req.garak_model,
@@ -214,9 +222,21 @@ def create_app(
         sid = config.session_id
         ms = ManagedSession(session_id=sid)
         managed[sid] = ms
+        _launch_runner(ms, config)
+        return {"session_id": sid}
+
+    def _launch_runner(ms: ManagedSession, config, *, resume: bool = False) -> None:
+        """
+        Shared helper: wire up emit + on_session_ready, create task.
+        Called by both start_session and resume_session.
+        """
+        sid = ms.session_id
 
         async def emit(event: dict) -> None:
             ms.event_log.append(event)
+
+        def on_session_ready(session_obj) -> None:
+            ms.session_obj = session_obj
 
         async def run_it() -> None:
             try:
@@ -225,8 +245,12 @@ def create_app(
                     sessions_dir=sessions_dir,
                     vault_dir=vault_dir,
                     emit=emit,
+                    on_session_ready=on_session_ready,
                 )
-                await runner.run()
+                if resume:
+                    await runner.resume()
+                else:
+                    await runner.run()
                 ms.status = "complete"
             except Exception as exc:
                 logger.exception("Session %s failed: %s", sid, exc)
@@ -236,7 +260,51 @@ def create_app(
                 ms.event_log.append({"type": "stream_done"})
 
         ms.task = asyncio.create_task(run_it())
-        return {"session_id": sid}
+
+    @app.post("/api/sessions/{session_id}/resume")
+    async def resume_session(session_id: str):
+        """Resume an incomplete session from disk."""
+        from arrai.memory.session_store import SessionStore
+        from arrai.models.session_config import SessionConfig
+
+        session_dir = sessions_dir / session_id
+        if not session_dir.exists():
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # Already running in this process?
+        existing = managed.get(session_id)
+        if existing and existing.status == "running":
+            return {"session_id": session_id}  # idempotent — just navigate to it
+
+        store = SessionStore(sessions_dir)
+        try:
+            cfg_dict = store.load_config(session_id)
+            config = SessionConfig.from_dict(cfg_dict)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Could not load session config: {exc}")
+
+        ms = ManagedSession(session_id=session_id)
+        managed[session_id] = ms
+        _launch_runner(ms, config, resume=True)
+        return {"session_id": session_id}
+
+    @app.post("/api/sessions/{session_id}/hitl")
+    async def hitl_respond(session_id: str, req: HitlRequest):
+        """
+        Deliver a Human-in-the-Loop decision for a paused session.
+
+        action: "approve" | "revise" | "reject"
+        revision: dict of Auftrag field overrides (only used for "revise")
+        """
+        ms = managed.get(session_id)
+        if not ms:
+            raise HTTPException(status_code=404, detail="Session not found in this server run")
+        if ms.status != "running":
+            raise HTTPException(status_code=409, detail=f"Session is not running (status={ms.status})")
+        if not ms.session_obj:
+            raise HTTPException(status_code=409, detail="Session object not ready yet")
+        ms.session_obj.resolve_hitl({"action": req.action, "revision": req.revision})
+        return {"ok": True}
 
     @app.get("/api/sessions/{session_id}")
     async def get_session(session_id: str):
@@ -328,6 +396,30 @@ def create_app(
                 "X-Accel-Buffering": "no",
                 "Connection": "keep-alive",
             },
+        )
+
+    @app.get("/api/sessions/{session_id}/export")
+    async def export_session(session_id: str):
+        """Download the full session directory as a zip archive."""
+        import io
+        import zipfile
+        from fastapi.responses import Response
+
+        session_dir = sessions_dir / session_id
+        if not session_dir.exists():
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in sorted(session_dir.rglob("*")):
+                if path.is_file():
+                    zf.write(path, path.relative_to(session_dir))
+        buf.seek(0)
+
+        return Response(
+            content=buf.read(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename=arrai-{session_id[:8]}.zip"},
         )
 
     @app.get("/api/sessions/{session_id}/replay")

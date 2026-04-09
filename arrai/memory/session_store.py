@@ -290,17 +290,44 @@ class SessionStore:
         reports = self.load_all_reports(session_id)
         return [r.summary_line() for r in reports]
 
+    # Windowing constants: keep the last N missions as full traces;
+    # anything older is collapsed to a one-line summary.
+    _TRACE_FULL_WINDOW = 10
+    _TRACE_SUMMARY_THRESHOLD = 20   # only activate windowing above this count
+
     def get_all_traces(self, session_id: str) -> str:
         """
         Full conversation traces for all missions — fed to Sherlock.
-        For sessions > 50 missions: last 20 full + summary for older (Phase 5).
+
+        Windowing: when a session has more than _TRACE_SUMMARY_THRESHOLD missions,
+        only the most recent _TRACE_FULL_WINDOW are returned as full traces.
+        Older missions are collapsed to a single summary line each so that
+        Sherlock's context stays manageable on long sessions.
         """
         reports = self.load_all_reports(session_id)
         if not reports:
             return ""
 
-        sections = []
-        for report in reports:
+        sections: list[str] = []
+
+        if len(reports) > self._TRACE_SUMMARY_THRESHOLD:
+            cutoff = len(reports) - self._TRACE_FULL_WINDOW
+            old_reports = reports[:cutoff]
+            recent_reports = reports[cutoff:]
+
+            # Compact block for older missions
+            summary_lines = [
+                f"### Older Missions — summaries only ({len(old_reports)} missions)",
+                "",
+            ]
+            for r in old_reports:
+                summary_lines.append(f"- {r.summary_line()}")
+            sections.append("\n".join(summary_lines))
+        else:
+            recent_reports = reports
+
+        # Full traces for recent missions
+        for report in recent_reports:
             lines = [
                 f"### Mission {report.mission_id[:8]} — {report.terminal_condition}",
                 f"Score: garak={report.garak_score:.2f} scorer={report.scorer_score:.2f}",
@@ -311,6 +338,7 @@ class SessionStore:
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 lines.append(f"[{prefix}]: {content}")
             sections.append("\n".join(lines))
+
         return "\n\n---\n\n".join(sections)
 
     # ------------------------------------------------------------------
