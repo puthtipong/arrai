@@ -1,0 +1,45 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── ArrAI runtime data (user-specific, may contain sensitive outputs) ─────────
+sessions/
+vault/
+*.log
+
+# ── Reference repos / archives (not part of the project) ─────────────────────
+pyrit-ms-repo/
+pyrit-ms-repo-handoff.tar.gz
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+
+# ── Playwright ────────────────────────────────────────────────────────────────
+playwright/.cache/

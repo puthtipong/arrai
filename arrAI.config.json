@@ -1,0 +1,10 @@
+{
+  "sessions_dir": "./sessions",
+  "vault_dir": "./vault",
+  "default_openai_api_key_env": "OPENAI_API_KEY",
+  "default_anthropic_api_key_env": "ANTHROPIC_API_KEY",
+  "server_host": "0.0.0.0",
+  "server_port": 7861,
+  "success_score_threshold": 0.8,
+  "hitl_pause_on_strategy_change": true
+}
