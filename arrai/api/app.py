@@ -55,7 +55,6 @@ class StartSessionRequest(BaseModel):
     max_missions: int = 10
     turn_budget: int = 8
     mode: str = "autonomous"
-    parallel_branches: int = 1
 
 
 class SetKeysRequest(BaseModel):
@@ -211,7 +210,6 @@ def create_app(
             mode=req.mode,
             max_missions=req.max_missions,
             default_turn_budget=req.turn_budget,
-            parallel_branches=req.parallel_branches,
             sherlock_model=req.sherlock_model,
             sherlock_effort=req.sherlock_effort,
             garak_model=req.garak_model,

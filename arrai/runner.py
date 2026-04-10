@@ -13,12 +13,9 @@ Each iteration:
 """
 
 import asyncio
-import copy
 import json
 import logging
-import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
@@ -240,93 +237,48 @@ class SessionRunner:
             auftrag = ooda.auftrag
 
             # ── 4. Dispatch Garak ─────────────────────────────────────
-            n_branches = max(1, config.parallel_branches)
+            await self._emit({
+                "type": "mission_start",
+                "mission_id": auftrag.mission_id,
+                "objective": auftrag.objective,
+                "turn_budget": auftrag.turn_budget,
+            })
 
-            if n_branches == 1:
-                # ── Single-branch path (normal, live SSE events) ──────
-                await self._emit({
-                    "type": "mission_start",
-                    "mission_id": auftrag.mission_id,
-                    "objective": auftrag.objective,
-                    "turn_budget": auftrag.turn_budget,
-                })
+            report: MissionReport = await garak.run_mission(auftrag, session)
 
-                report: MissionReport = await garak.run_mission(auftrag, session)
+            # ── 5. Score ──────────────────────────────────────────────
+            score, rationale = await scorer.score_async(
+                report.conversation_trace,
+                auftrag.success_criteria,
+            )
+            report.scorer_score = score
+            report.scorer_rationale = rationale
 
-                # ── 5. Score ──────────────────────────────────────────
-                score, rationale = await scorer.score_async(
-                    report.conversation_trace,
-                    auftrag.success_criteria,
-                )
-                report.scorer_score = score
-                report.scorer_rationale = rationale
+            await self._emit({
+                "type": "scorer_result",
+                "mission_id": auftrag.mission_id,
+                "score": score,
+                "rationale": rationale,
+            })
 
-                await self._emit({
-                    "type": "scorer_result",
-                    "mission_id": auftrag.mission_id,
-                    "score": score,
-                    "rationale": rationale,
-                })
+            # ── 6. Persist ────────────────────────────────────────────
+            self._store.save_mission(config.session_id, auftrag, report)
+            self._store.append_mission_log_entry(config.session_id, report)
 
-                # ── 6. Persist ────────────────────────────────────────
-                self._store.save_mission(config.session_id, auftrag, report)
-                self._store.append_mission_log_entry(config.session_id, report)
+            await self._emit({
+                "type": "mission_complete",
+                "mission_id": report.mission_id,
+                "terminal_condition": report.terminal_condition,
+                "garak_score": report.garak_score,
+                "scorer_score": report.scorer_score,
+            })
 
-                await self._emit({
-                    "type": "mission_complete",
-                    "mission_id": report.mission_id,
-                    "terminal_condition": report.terminal_condition,
-                    "garak_score": report.garak_score,
-                    "scorer_score": report.scorer_score,
-                })
-
-                # ── 7. Feed report back to Sherlock on next cycle ─────
-                # No automatic termination here. Sherlock is the only
-                # one who can declare the OVERALL objective complete.
-                last_report = report
-                mission_count += 1
-
-            else:
-                # ── Parallel-branch path ───────────────────────────────
-                # Run N Garak instances concurrently (silently), then
-                # emit a single summary event for the best result.
-                await self._emit({
-                    "type": "mission_start",
-                    "mission_id": auftrag.mission_id,
-                    "objective": f"[×{n_branches} parallel] {auftrag.objective}",
-                    "turn_budget": auftrag.turn_budget,
-                })
-
-                branch_pairs = await self._run_parallel_branches(
-                    auftrag, session, n_branches, garak, scorer
-                )
-
-                # Pick the branch with the highest scorer score
-                best_auftrag, report = max(branch_pairs, key=lambda x: x[1].scorer_score)
-
-                # Persist ALL branches; each has its own mission_id
-                for ba, br in branch_pairs:
-                    self._store.save_mission(config.session_id, ba, br)
-                    self._store.append_mission_log_entry(config.session_id, br)
-
-                await self._emit({
-                    "type": "scorer_result",
-                    "mission_id": report.mission_id,
-                    "score": report.scorer_score,
-                    "rationale": report.scorer_rationale,
-                })
-                await self._emit({
-                    "type": "mission_complete",
-                    "mission_id": report.mission_id,
-                    "terminal_condition": report.terminal_condition,
-                    "garak_score": report.garak_score,
-                    "scorer_score": report.scorer_score,
-                    "branches_run": n_branches,
-                })
-
-                # Count all branches against the mission budget
-                last_report = report
-                mission_count += n_branches
+            # ── 7. Feed report back to Sherlock on next cycle ─────────
+            # No automatic termination here. Sherlock is the only one who
+            # can declare the OVERALL objective complete. Mission scorer
+            # scores are signal for Sherlock, not termination triggers.
+            last_report = report
+            mission_count += 1
 
         # Max missions reached — give Sherlock one final cycle to summarise
         logger.info("Max missions (%d) reached. Running final Sherlock review.", config.max_missions)
@@ -340,51 +292,6 @@ class SessionRunner:
             "reason": "max_missions_reached",
             "session_summary": final_ooda.session_summary or "",
         })
-
-    # ------------------------------------------------------------------
-    # Parallel branches
-    # ------------------------------------------------------------------
-
-    async def _run_parallel_branches(
-        self,
-        auftrag: "Any",
-        session: "Session",
-        n: int,
-        garak: "GarakAgent",
-        scorer: "ScorerModel",
-    ) -> list[tuple]:
-        """
-        Clone the Auftrag n times (each with a unique mission_id) and run
-        them all concurrently.  Each branch uses a silent emit so the SSE
-        stream stays clean; the caller emits a single summary for the best.
-
-        Returns a list of (auftrag, scored_report) tuples.
-        """
-        async def run_one(_: int) -> tuple:
-            branch_auftrag = copy.copy(auftrag)
-            branch_auftrag.mission_id = str(uuid.uuid4())
-            branch_auftrag.issued_at = datetime.now(timezone.utc)
-
-            # Silent session — no per-turn SSE events during parallel run
-            silent_session = Session(
-                config=session.config,
-                target=session.target,
-                store=session.store,
-                vault=session.vault,
-                emit=_noop_emit,
-            )
-
-            report = await garak.run_mission(branch_auftrag, silent_session)
-            score, rationale = await scorer.score_async(
-                report.conversation_trace,
-                branch_auftrag.success_criteria,
-            )
-            report.scorer_score = score
-            report.scorer_rationale = rationale
-            return branch_auftrag, report
-
-        results = await asyncio.gather(*(run_one(i) for i in range(n)))
-        return list(results)
 
     # ------------------------------------------------------------------
     # Session report

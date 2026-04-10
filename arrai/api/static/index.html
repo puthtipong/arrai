@@ -397,7 +397,7 @@
       </fieldset>
 
       <!-- Budget + Mode -->
-      <div class="grid grid-cols-4 gap-3">
+      <div class="grid grid-cols-3 gap-3">
         <div>
           <label class="block text-xs text-gray-400 mb-1">Max missions</label>
           <input x-model.number="form.max_missions" type="number" min="1" max="50"
@@ -406,12 +406,6 @@
         <div>
           <label class="block text-xs text-gray-400 mb-1">Turn budget</label>
           <input x-model.number="form.turn_budget" type="number" min="1" max="30"
-            class="w-full bg-surface border border-border rounded px-2.5 py-1.5 text-sm text-white focus:outline-none focus:border-violet-500">
-        </div>
-        <div>
-          <label class="block text-xs text-gray-400 mb-1">Branches</label>
-          <input x-model.number="form.parallel_branches" type="number" min="1" max="8"
-            title="Parallel Garak branches per OODA cycle. Best result is fed to Sherlock."
             class="w-full bg-surface border border-border rounded px-2.5 py-1.5 text-sm text-white focus:outline-none focus:border-violet-500">
         </div>
         <div>
@@ -828,7 +822,6 @@
         scorer_model: 'gpt-4o-mini',
         max_missions: 10,
         turn_budget: 8,
-        parallel_branches: 1,
         mode: 'autonomous',
         showSystemPrompt: false,
         showContext: false,
